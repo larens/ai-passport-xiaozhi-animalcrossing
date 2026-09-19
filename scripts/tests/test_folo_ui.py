@@ -32,6 +32,9 @@ class FoloUiHostTests(unittest.TestCase):
     def test_cw2017_driver_with_simulated_i2c(self):
         self.compile_and_run("folo_battery_test.cc")
 
+    def test_background_music_yield_policy(self):
+        self.compile_and_run("folo_background_music_test.cc")
+
     def test_saved_brightness_integer_types_and_bounds(self):
         # Compile the actual source expressions with both int and long storage.
         # On the ESP32-C3 toolchain int32_t is long; on many hosts it is int.

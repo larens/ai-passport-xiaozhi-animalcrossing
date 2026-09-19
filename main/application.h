@@ -17,6 +17,8 @@
 #include "protocol.h"
 #include "ota.h"
 #include "audio_service.h"
+#include "audio/background_music.h"
+#include "audio/background_music_player.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "notify/notify_player.h"
@@ -141,6 +143,8 @@ private:
     std::string last_error_message_;
     AudioService audio_service_;
     NotifyPlayer notify_player_;
+    BackgroundMusic background_music_;
+    BackgroundMusicPlayer background_music_player_{audio_service_};
     uint32_t notification_playback_id_ = 0;
     std::unique_ptr<Ota> ota_;
 

@@ -1,16 +1,18 @@
-# 小智人物 UI 源码版
+# 动物森友会服务台 UI 源码版
 
 适用设备：Folo AI Passport，ESP32-C3，8MB Flash，无 PSRAM，240 × 320 ST7789P3。
 
 ## 这次已修改什么
 
-- 新人物为长发、发夹、浅绿色上衣的轻量像素女性形象，沿用“知心大姐姐”的方向。
-- 按之前选择的代码绘制方案简化了造型，不是设计稿逐像素复刻；人物基础坐标为 48 × 48，显示为 192 × 192。
-- 待机、聆听、思考、说话、低电量、睡意、唤醒共七种表情，含眨眼、嘴型和聆听指示变化。
+- 主人公改为动物森友会西施惠形象，作为 240 × 320 全屏背景铺满屏幕，取代原来的代码绘制像素人物。
+- 背景图为 RGB565 预转换图片（`bg_shizue.c`），直接从 flash 渲染，无 PSRAM 也不占运行内存。
+- 对话文字下方常显一张带透明的气泡背景（`bubble_bg.c`，RGB565A8）；系统文案和对话都渲染在气泡内。
+- 回复文字支持多行自动换行，并底部对齐：内容超出气泡高度时，最早的行向上滚出顶部消失，新内容从底部追加。
+- 运行期以 50% 音量循环播放 `Resident.mp3`（离线转码为 `resident.ogg`，增益烘焙进文件）作为背景音；说话、聆听、通知、连接、配网、激活、升级时自动让路，仅待机时播放，不影响回复音量。
 - 顶部显示网络、静音、同步后的时间和真实电量百分比；未同步时间显示 `--:--`，电量读取失败显示 `--%`。
 - 电量不高于 15% 时提醒，回升到 20% 后解除低电量状态。
 - 加入音量、亮度、设备信息、配网和重启菜单。
-- 配网、激活和升级时让出人物区域，用于完整显示热点、地址、验证码和进度文本。
+- 配网、激活和升级时隐藏气泡，用整屏完整显示热点、地址、验证码和进度文本。
 - 保留原来音频、网络、唤醒词和服务器连接流程。
 
 ## 怎么操作
@@ -106,11 +108,14 @@ python scripts/build.py folo/ai-passport-c3 --name folo-ai-passport-c3 --languag
 
 ## 修改位置
 
-- `main/boards/folo/ai-passport-c3/folo_display.*`：板卡专用 UI。
-- `pixel_portrait.h`：代码绘制人物和状态。
+- `main/boards/folo/ai-passport-c3/folo_display.*`：板卡专用 UI（全屏背景、气泡、多行滚动文字）。
+- `main/boards/folo/ai-passport-c3/bg_shizue.c`、`bubble_bg.c`、`folo_images.h`：西施惠背景图与气泡图资源及其声明。
+- `main/boards/folo/ai-passport-c3/assets_src/`：图片资源生成脚本 `gen_images.py` 与说明。
+- `main/audio/background_music.{h}`、`background_music_player.{h,cc}`：背景音让路决策与循环播放。
+- `main/assets/common/resident.ogg`：离线转码、增益 50% 的背景音。
 - `screen_idle.h`：可在主机测试的息屏策略。
 - `cw2017.h`：电量计接入。
 - `folo_ai_passport_c3_board.cc`：按键、菜单和硬件连接。
 - `main/display/display.h`、`main/application.cc`：语音活动通知。
 - `main/boards/common/backlight.cc`：修复渐暗过程中唤醒未取消旧目标的问题。
-- `scripts/tests/`：新增主机回归测试；`scripts/preview_folo_portrait.cc`：源码人物预览生成器。
+- `scripts/tests/`：主机回归测试（息屏策略、电量驱动、背景音让路策略）。

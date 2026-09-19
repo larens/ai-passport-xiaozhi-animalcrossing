@@ -2,7 +2,6 @@
 
 #include "display/lcd_display.h"
 #include "device_state.h"
-#include "pixel_portrait.h"
 #include "screen_idle.h"
 
 class FoloDisplay : public SpiLcdDisplay {
@@ -30,25 +29,24 @@ public:
 private:
     void Activity();
     void ApplySleep(bool asleep);
-    void RefreshPortrait();
     void RefreshContent();
-    lv_obj_t* portrait_obj_ = nullptr;
+    // Bottom-anchored multi-line chat text: newest lines stay visible, older
+    // lines scroll up out of the clipping window.
+    void LayoutChatText(bool full_text);
+    lv_obj_t* background_image_ = nullptr;
+    lv_obj_t* bubble_image_ = nullptr;
+    lv_obj_t* text_clip_ = nullptr;
     lv_obj_t* clock_label_ = nullptr;
     lv_obj_t* percentage_label_ = nullptr;
     lv_obj_t* menu_label_ = nullptr;
     lv_obj_t* volume_bar_ = nullptr;
-    lv_timer_t* animation_timer_ = nullptr;
     ScreenIdle idle_;
     DeviceState state_ = kDeviceStateUnknown;
-    PortraitState portrait_state_ = PortraitState::Idle;
-    PortraitState emotion_ = PortraitState::Idle;
-    unsigned frame_ = 0;
     unsigned status_ticks_ = 0;
     bool panel_asleep_ = false;
     bool menu_open_ = false;
     bool thinking_ = false;
     bool low_battery_ = false;
-    int64_t wake_until_ = 0;
     int64_t volume_until_ = 0;
     std::string message_;
 };

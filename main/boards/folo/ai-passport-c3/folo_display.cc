@@ -4,12 +4,14 @@
 #include "assets/lang_config.h"
 #include "audio_codec.h"
 #include "board.h"
+#include "folo_images.h"
 #include "lvgl_theme.h"
 
 #include <material_symbols.h>
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <string>
 
 namespace {
 lv_obj_t* Label(lv_obj_t* parent, int x, int y, int w, int h) {
@@ -24,13 +26,58 @@ bool FullTextState(DeviceState state) {
     return state == kDeviceStateWifiConfiguring || state == kDeviceStateActivating ||
            state == kDeviceStateUpgrading || state == kDeviceStateFatalError;
 }
+
+// Decode one UTF-8 code point starting at s[i]. Returns the byte length of the
+// sequence (1..4) and advances nothing; callers add the returned length to i.
+// Malformed leading bytes are treated as a single byte so we never loop forever.
+int Utf8SequenceLen(const char* s, size_t i, size_t n) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    int len = 1;
+    if ((c & 0x80) == 0x00) len = 1;        // 0xxxxxxx  ASCII
+    else if ((c & 0xE0) == 0xC0) len = 2;   // 110xxxxx
+    else if ((c & 0xF0) == 0xE0) len = 3;   // 1110xxxx  (most CJK here)
+    else if ((c & 0xF8) == 0xF0) len = 4;   // 11110xxx
+    // Clamp to the remaining bytes so a truncated tail never overruns.
+    return static_cast<int>(std::min<size_t>(len, n - i));
+}
+
+// Hard-wrap text so every visual line holds at most `max_units` character
+// widths, counting an ASCII/half-width byte as 1 and any multi-byte (CJK /
+// full-width) code point as 2. Existing '\n' in the source are preserved and
+// reset the per-line width counter. This gives deterministic wrapping (e.g.
+// 10 Chinese characters per line at width 20) instead of relying on LVGL's
+// pixel-based auto wrap, which drifts with mixed-width and punctuation runs.
+std::string WrapByCharWidth(const char* text, int max_units) {
+    std::string out;
+    if (text == nullptr) return out;
+    const size_t n = std::strlen(text);
+    out.reserve(n + n / 8 + 4);  // room for inserted newlines
+    int units = 0;
+    for (size_t i = 0; i < n;) {
+        if (text[i] == '\n') {
+            out.push_back('\n');
+            units = 0;
+            ++i;
+            continue;
+        }
+        const int seq = Utf8SequenceLen(text, i, n);
+        const int width = seq == 1 ? 1 : 2;  // ASCII=1, multi-byte(CJK)=2
+        if (units + width > max_units) {
+            out.push_back('\n');
+            units = 0;
+        }
+        out.append(text + i, seq);
+        units += width;
+        i += seq;
+    }
+    return out;
+}
 }
 
 FoloDisplay::~FoloDisplay() {
     DisplayLockGuard lock(this);
     esp_timer_stop(notification_timer_);
     esp_timer_stop(preview_timer_);
-    if (animation_timer_) lv_timer_delete(animation_timer_);
     if (display_) lv_obj_clean(lv_display_get_screen_active(display_));
     // Base destructors must not delete children after deleting their display.
     network_label_ = status_label_ = notification_label_ = mute_label_ = battery_label_ = nullptr;
@@ -45,6 +92,14 @@ void FoloDisplay::SetupUI() {
     auto screen = lv_display_get_screen_active(display_);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(screen, 0, 0);
+
+    // Full-screen background image (Isabelle / 西施惠). Created first and pushed
+    // to the bottom so every label and the bubble render on top of it.
+    background_image_ = lv_image_create(screen);
+    lv_image_set_src(background_image_, &bg_shizue);
+    lv_obj_set_pos(background_image_, 0, 0);
+    lv_obj_move_background(background_image_);
+
     network_label_ = Label(screen, 8, 4, 24, 24);
     mute_label_ = Label(screen, 36, 4, 24, 24);
     clock_label_ = Label(screen, 65, 4, 84, 24);
@@ -59,33 +114,32 @@ void FoloDisplay::SetupUI() {
     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
-    portrait_obj_ = lv_obj_create(screen);
-    lv_obj_remove_style_all(portrait_obj_);
-    lv_obj_remove_flag(portrait_obj_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(portrait_obj_, 24, 50);
-    lv_obj_set_size(portrait_obj_, 192, 192);
-    lv_obj_add_event_cb(portrait_obj_, [](lv_event_t* event) {
-        auto self = static_cast<FoloDisplay*>(lv_event_get_user_data(event));
-        auto layer = lv_event_get_layer(event);
-        lv_area_t origin;
-        lv_obj_get_coords(self->portrait_obj_, &origin);
-        DrawPixelPortrait([&](int x, int y, int w, int h, uint32_t color) {
-            lv_draw_rect_dsc_t style;
-            lv_draw_rect_dsc_init(&style);
-            style.bg_color = lv_color_hex(color);
-            style.bg_opa = LV_OPA_COVER;
-            lv_area_t area = {origin.x1 + x * 4, origin.y1 + y * 4,
-                              origin.x1 + (x + w) * 4 - 1, origin.y1 + (y + h) * 4 - 1};
-            lv_draw_rect(layer, &style, &area);
-        }, self->portrait_state_, self->frame_);
-    }, LV_EVENT_DRAW_MAIN, this);
-
     preview_image_ = lv_image_create(screen);
     lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
 
-    chat_message_label_ = Label(screen, 12, 246, 216, 68);
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL);
-    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+    // Always-on speech bubble background behind the chat text.
+    bubble_image_ = lv_image_create(screen);
+    lv_image_set_src(bubble_image_, &bubble_bg);
+    lv_obj_set_pos(bubble_image_, 4, 224);
+
+    // Clipping window for the chat text. The label lives inside it and is
+    // bottom-anchored so the newest lines stay visible while older lines
+    // scroll up out of the window.
+    text_clip_ = lv_obj_create(screen);
+    lv_obj_remove_style_all(text_clip_);
+    lv_obj_remove_flag(text_clip_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(text_clip_, 16, 238);
+    lv_obj_set_size(text_clip_, 208, 74);
+
+    chat_message_label_ = lv_label_create(text_clip_);
+    lv_obj_set_pos(chat_message_label_, 0, 0);
+    lv_obj_set_width(chat_message_label_, 208);
+    lv_obj_set_height(chat_message_label_, LV_SIZE_CONTENT);
+    lv_label_set_text(chat_message_label_, "");
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_line_space(chat_message_label_, 2, 0);
+
     menu_label_ = Label(screen, 12, 64, 216, 248);
     lv_label_set_long_mode(menu_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(menu_label_, 8, 0);
@@ -101,11 +155,6 @@ void FoloDisplay::SetupUI() {
     SetTheme(current_theme_);
     idle_.Activity(esp_timer_get_time());
     RefreshContent();
-    animation_timer_ = lv_timer_create([](lv_timer_t* timer) {
-        auto self = static_cast<FoloDisplay*>(lv_timer_get_user_data(timer));
-        ++self->frame_;
-        if (!self->panel_asleep_ && !self->menu_open_) lv_obj_invalidate(self->portrait_obj_);
-    }, 350, this);
 }
 
 void FoloDisplay::SetTheme(Theme* theme) {
@@ -124,6 +173,11 @@ void FoloDisplay::SetTheme(Theme* theme) {
     }
     lv_obj_set_style_text_color(status_label_, lv_color_hex(dark ? 0x8AD4C8 : 0x28776D), 0);
     lv_obj_set_style_text_color(notification_label_, lv_color_hex(dark ? 0xF3A5BC : 0xA33F63), 0);
+    // Chat text sits on the light speech bubble, so force near-black for
+    // maximum contrast regardless of the background image behind it.
+    if (chat_message_label_) {
+        lv_obj_set_style_text_color(chat_message_label_, lv_color_hex(0x1A1A1A), 0);
+    }
 }
 
 void FoloDisplay::Activity() {
@@ -142,14 +196,10 @@ void FoloDisplay::ApplySleep(bool asleep) {
         lv_obj_add_flag(menu_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(volume_bar_, LV_OBJ_FLAG_HIDDEN);
         volume_until_ = 0;
-        if (animation_timer_) lv_timer_pause(animation_timer_);
         backlight->SetBrightness(0);  // Do not overwrite saved brightness.
     } else {
-        wake_until_ = esp_timer_get_time() + 2000000;
         backlight->RestoreBrightness();
-        if (animation_timer_) lv_timer_resume(animation_timer_);
     }
-    RefreshPortrait();
     RefreshContent();
 }
 
@@ -158,7 +208,6 @@ bool FoloDisplay::WakeFromKey() {
     if (!setup_ui_called_) return true;
     bool consumed = panel_asleep_;
     Activity();
-    RefreshPortrait();
     return consumed;
 }
 
@@ -174,19 +223,15 @@ void FoloDisplay::SetStatus(const char* status) {
         Activity();
     }
     LvglDisplay::SetStatus(status);
-    RefreshPortrait();
     RefreshContent();
 }
 
 void FoloDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
     if (!setup_ui_called_) return;
-    emotion_ = PortraitState::Idle;
-    if (emotion && (!strcmp(emotion, "sad") || !strcmp(emotion, "crying") ||
-                    !strcmp(emotion, "angry"))) emotion_ = PortraitState::Sad;
-    else if (emotion && !strcmp(emotion, "sleepy")) emotion_ = PortraitState::Sleepy;
-    else if (emotion && !strcmp(emotion, "thinking")) emotion_ = PortraitState::Thinking;
-    RefreshPortrait();
+    // The static Isabelle background replaces the animated portrait, so emotions
+    // no longer drive a sprite. Kept as a no-op to satisfy the Display interface.
+    (void)emotion;
 }
 
 void FoloDisplay::SetChatMessage(const char* role, const char* content) {
@@ -201,7 +246,6 @@ void FoloDisplay::SetChatMessage(const char* role, const char* content) {
         }
         else if (role && !strcmp(role, "assistant")) thinking_ = false;
     }
-    RefreshPortrait();
     RefreshContent();
 }
 
@@ -212,42 +256,73 @@ void FoloDisplay::ClearChatMessages() {
     if (setup_ui_called_) RefreshContent();
 }
 
-void FoloDisplay::RefreshPortrait() {
-    portrait_state_ = emotion_;
-    if (panel_asleep_) portrait_state_ = PortraitState::Sleepy;
-    else if (state_ == kDeviceStateSpeaking || state_ == kDeviceStateNotifying)
-        portrait_state_ = PortraitState::Speaking;
-    else if (thinking_ || state_ == kDeviceStateConnecting)
-        portrait_state_ = PortraitState::Thinking;
-    else if (state_ == kDeviceStateListening) portrait_state_ = PortraitState::Listening;
-    else if (esp_timer_get_time() < wake_until_) portrait_state_ = PortraitState::Wake;
-    else if (low_battery_) portrait_state_ = PortraitState::Sad;
-    if (!panel_asleep_) lv_obj_invalidate(portrait_obj_);
-}
-
 void FoloDisplay::RefreshContent() {
     const bool full_text = FullTextState(state_);
-    const bool hide_portrait = full_text || menu_open_ || preview_image_cached_ != nullptr;
-    if (hide_portrait) lv_obj_add_flag(portrait_obj_, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_remove_flag(portrait_obj_, LV_OBJ_FLAG_HIDDEN);
     if (full_text || menu_open_ || !preview_image_cached_)
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-    if (menu_open_ || (hide_subtitle_ && !full_text))
-        lv_obj_add_flag(chat_message_label_, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_remove_flag(chat_message_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(chat_message_label_, 12, full_text ? 64 : 246);
-    lv_obj_set_size(chat_message_label_, 216, full_text ? 248 : 68);
+
+    // The bubble is shown behind ordinary chat text only. Full-screen text
+    // states (provisioning/activation/upgrade), the menu and image preview all
+    // hide it so the text can use the whole screen.
+    const bool hide_bubble = full_text || menu_open_ || preview_image_cached_ != nullptr;
+    if (hide_bubble) lv_obj_add_flag(bubble_image_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(bubble_image_, LV_OBJ_FLAG_HIDDEN);
+
+    const bool hide_text = menu_open_ || (hide_subtitle_ && !full_text);
+    if (hide_text) lv_obj_add_flag(text_clip_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(text_clip_, LV_OBJ_FLAG_HIDDEN);
+
+    // Full-screen text uses a large clip window; ordinary chat text stays inside
+    // the bubble.
+    if (full_text) {
+        lv_obj_set_pos(text_clip_, 12, 64);
+        lv_obj_set_size(text_clip_, 216, 248);
+        lv_obj_set_width(chat_message_label_, 216);
+    } else {
+        lv_obj_set_pos(text_clip_, 16, 238);
+        lv_obj_set_size(text_clip_, 208, 74);
+        lv_obj_set_width(chat_message_label_, 208);
+    }
+
     const char* content = message_.c_str();
     if (message_.empty()) {
         if (state_ == kDeviceStateListening) content = "我在听，你慢慢说";
         else if (state_ == kDeviceStateConnecting) content = "正在连接，请稍等";
         else if (state_ == kDeviceStateSpeaking) content = "我正在回答";
         else if (low_battery_) content = "电量较低，请及时充电";
-        else content = "你好，我是小智\n今天想聊点什么？";
+        else content = "你好，我是西施惠\n今天想聊点什么？";
     }
-    if (strcmp(lv_label_get_text(chat_message_label_), content))
-        lv_label_set_text(chat_message_label_, content);
+    // Ordinary chat text is hard-wrapped to a fixed character width (20 units =
+    // 10 Chinese chars per line) for tidy, deterministic line breaks inside the
+    // narrow bubble. Full-screen text (provisioning/activation/upgrade) keeps
+    // LVGL's pixel wrap so it can use the whole width.
+    std::string wrapped;
+    const char* display_text = content;
+    if (!full_text) {
+        wrapped = WrapByCharWidth(content, 20);
+        display_text = wrapped.c_str();
+    }
+    if (strcmp(lv_label_get_text(chat_message_label_), display_text))
+        lv_label_set_text(chat_message_label_, display_text);
+    LayoutChatText(full_text);
+}
+
+void FoloDisplay::LayoutChatText(bool full_text) {
+    // Force the label to recompute its content height for the current width,
+    // then bottom-anchor it inside the clip window. When the text is taller
+    // than the window the top lines scroll up out of view; when it is shorter
+    // it is vertically centered for a tidy look.
+    lv_obj_update_layout(chat_message_label_);
+    const int32_t window_h = lv_obj_get_height(text_clip_);
+    const int32_t text_h = lv_obj_get_height(chat_message_label_);
+    int32_t y;
+    if (text_h >= window_h) {
+        y = window_h - text_h;  // negative: oldest lines clipped at the top
+    } else {
+        y = (window_h - text_h) / 2;  // fits: center vertically
+    }
+    lv_obj_set_y(chat_message_label_, y);
 }
 
 void FoloDisplay::UpdateStatusBar(bool update_all) {
@@ -302,7 +377,6 @@ void FoloDisplay::UpdateStatusBar(bool update_all) {
         lv_obj_add_flag(volume_bar_, LV_OBJ_FLAG_HIDDEN);
         RefreshContent();
     }
-    RefreshPortrait();
     if (!volume_until_) RefreshContent();
 }
 

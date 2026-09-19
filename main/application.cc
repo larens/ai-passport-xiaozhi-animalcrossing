@@ -72,6 +72,11 @@ void Application::Initialize() {
     audio_service_.Initialize(codec);
     audio_service_.Start();
 
+    // Start the looping background music. Its gain is baked in at 10% offline,
+    // so it never changes reply loudness; it yields whenever the device leaves
+    // the idle state (see the per-second decision in the clock tick handler).
+    background_music_player_.Start(Lang::Sounds::OGG_RESIDENT);
+
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
@@ -273,6 +278,11 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+
+            // Background music plays only while idle; it steps aside for any
+            // speech/reply/full-screen-text state.
+            background_music_.Update(GetDeviceState());
+            background_music_player_.SetEnabled(background_music_.enabled());
 
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
@@ -983,6 +993,11 @@ void Application::HandleStateChangedEvent() {
     // Any state change invalidates a pending deferred listening start;
     // the Listening case below re-arms it when needed.
     pending_listening_start_ = false;
+
+    // React to the state change immediately so background music yields for
+    // speech without waiting for the next per-second clock tick.
+    background_music_.Update(new_state);
+    background_music_player_.SetEnabled(background_music_.enabled());
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
